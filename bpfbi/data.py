@@ -31,11 +31,7 @@ def prepare(args):
             split = frame.iloc[left:right]
             clean = split["load"].to_numpy(float)
             valid = np.isfinite(clean)
-            missing = pd.Series(~valid)
-            run_length = missing.groupby(missing.ne(missing.shift()).cumsum()).transform("size").to_numpy()
-            interpolated = pd.Series(clean).interpolate(limit_area="inside").to_numpy()
-            observed = clean.copy()
-            observed[(~valid) & (run_length <= 3)] = interpolated[(~valid) & (run_length <= 3)]
+            observed = pd.Series(clean).ffill(limit=3).to_numpy()
             anomaly = np.zeros(len(split), dtype=np.float32)
             rng = np.random.default_rng(args.seed + 1009 * number + left)
             if args.anomaly_fraction:
@@ -50,6 +46,9 @@ def prepare(args):
                     end = start + length
                     if occupied[start:end].any() or not valid[start:end].all() or start == 0:
                         continue
+                    previous = observed[:start][np.isfinite(observed[:start])]
+                    if kind == 2 and not len(previous):
+                        continue
                     occupied[start:end] = True
                     anomaly[start:end] = 1
                     if kind == 0:
@@ -57,7 +56,7 @@ def prepare(args):
                     elif kind == 1:
                         observed[start:end] += 0.25 * scale * np.arange(1, length + 1)
                     elif kind == 2:
-                        observed[start:end] = observed[start - 1]
+                        observed[start:end] = previous[-1]
                     else:
                         observed[start:end] = np.nan
             mask = np.isfinite(observed)

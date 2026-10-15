@@ -29,7 +29,7 @@ For BDG2, melt the electricity meter columns, join building/site metadata and we
 bpfbi prepare --csv data/meters.csv --weather air_temperature --output data/hour1 --horizon 1 --seed 11
 ```
 
-Clients below 95% completeness are excluded. Each client's timeline is split 60/20/20. Interpolation fills only complete missing runs of at most three hours inside a split; longer gaps retain an observation-mask feature. Training statistics determine each client's load/weather normalization. Window extraction stays inside each split. Inputs contain 168 past hourly readings, masks, cyclic calendar features, holidays and declared weather. Original missing targets are excluded from supervision.
+Clients below 95% completeness are excluded. Each client's timeline is split 60/20/20. To keep forecast inputs causal, missing readings carry the last available reading forward for at most three consecutive hours; subsequent missing hours retain an observation-mask feature. This replaces the paper's within-split interpolation, which can otherwise draw on a reading after the forecast origin. Training statistics determine each client's load/weather normalization. Window extraction stays inside each split. Inputs contain 168 past hourly readings, masks, cyclic calendar features, holidays and declared weather. Original missing targets are excluded from supervision.
 
 Anomaly injection happens after splitting. `--anomaly-fraction 0.3` targets 30% affected hours using nonoverlapping spike, drift, freeze and missing events; `0` creates clean data. Separate split-specific random streams prevent identical event placement across partitions. Forecast targets retain the original clean load; the observed, potentially corrupted meter value and event label are stored separately. This convention measures recovery of clean demand and detection of meter corruption. The anomaly head predicts from the historical window; interval exceedance becomes available when the target reading arrives. Missing targets give maximum exceedance. Forecasting never receives that future reading.
 
@@ -69,7 +69,7 @@ The selected model for each client is saved as `model_NNN.pt` with its calibrati
 
 `metrics.json` reports mean/worst/client-standard-deviation nRMSE; per-building and aggregate coverage, width and 90% Winkler score; anomaly AUPRC, event F1 and detection delay; client participation, completed rounds, upload/download MiB, operation proxy and elapsed time. AUPRC is null for a one-class test set and delay is null without a matched detection. Event matching is one-to-one timestamp overlap. A detected episode spanning two reference events receives one match. Width and errors use original meter units. A confidence interval uses buildings as sampling units.
 
-Calibration uses only validation residuals and a finite-sample higher quantile for 90% coverage. Test data do not update calibration or parameters. The alarm threshold is 0.80, combining 0.60 sigmoid probability with 0.40 normalized calibrated interval exceedance.
+Calibration uses only validation residuals and the sorted residual at one-based rank `min(n, ceil(0.90*(n+1)))` for 90% coverage. Test data do not update calibration or parameters. The alarm threshold is 0.80, combining 0.60 sigmoid probability with 0.40 normalized calibrated interval exceedance.
 
 ```bash
 bpfbi compare --first outputs/full --second outputs/fedper --output outputs/paired.json --hac-lag 24
