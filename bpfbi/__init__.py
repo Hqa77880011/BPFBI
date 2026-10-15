@@ -1,1 +1,1 @@
-from .model import BuildingModel
+from .model import BuildingModel as BuildingModel
