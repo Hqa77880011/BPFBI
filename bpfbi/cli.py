@@ -211,7 +211,9 @@ def compare(args):
     for rank, index in enumerate(order):
         maximum = max(maximum, min(1, (len(rows) - rank) * rows[index]["p"]))
         rows[index]["holm_p"] = maximum
-    Path(args.output).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
 def main():
