@@ -27,9 +27,9 @@ For BDG2, melt the electricity meter columns, join building/site metadata and we
 bpfbi prepare --csv data/meters.csv --weather air_temperature --output data/hour1 --horizon 1 --seed 11
 ```
 
-Clients below 95% completeness are excluded. Each client's timeline is split 60/20/20. To keep forecast inputs causal, missing readings carry the last available reading forward for at most three consecutive hours; subsequent missing hours retain an observation-mask feature. This replaces the paper's within-split interpolation, which can otherwise draw on a reading after the forecast origin. Training statistics determine each client's load/weather normalization. Window extraction stays inside each split. Inputs contain 168 past hourly readings, masks, cyclic calendar features, holidays and declared weather. Original missing targets are excluded from supervision.
+Clients below 95% completeness are excluded. Each client's timeline is split 60/20/20. Within each input window, complete bounded missing runs of at most three hours are linearly interpolated. Longer and unbounded runs remain masked. Interpolation never reads after the forecast origin or across chronological splits. Training statistics determine each client's load/weather normalization. Window extraction stays inside each split. Inputs contain 168 past hourly readings, masks, cyclic calendar features, holidays and declared weather. Original missing targets are excluded from supervision.
 
-`--anomaly-fraction` controls seeded synthetic meter corruption after chronological splitting (default 0.3). Use `--horizon 1`, `6` or `24` in separate prepared directories.
+`--anomaly-fraction` selects exactly round(fraction × usable-window-count) windows in each split after chronological splitting (default 0.3). Each selected window contains exactly one seeded spike/drift/freeze/missing event; its class label denotes event presence in that window. Per-window inputs and event kind/start/end are frozen in the prepared NPZ, so overlapping windows can carry different simulated events. Forecast targets remain the clean readings; detection uses the window head and the observed target exceedance when an event covers that timestamp. Use `--horizon 1`, `6` or `24` in separate prepared directories.
 
 ## Training and inference
 
@@ -46,6 +46,7 @@ The run fits validation calibration and evaluates each building on its held-out 
 ```bash
 bpfbi run --data data/hour1 --output outputs/fedper --method fedper --seed 11
 bpfbi run --data data/hour1 --output outputs/no_debt --method no_debt --seed 11
+bpfbi run --data data/hour1 --output outputs/local --method local --match-run outputs/full/history.json --rounds 100 --local-epochs 2 --seed 11
 ```
 
 Also supported: `fedavg`, `fedprox`, `local`, `no_calibration`. Fix the seed, availability schedule and resource limits.
@@ -75,7 +76,7 @@ python verify.py --output outputs/functional-check
 | nRMSE (mean/worst/SD/CI), PICP, MPIW, Winkler, event F1/AUPRC/delay, bytes/FLOP proxy/participation | `bpfbi/cli.py:evaluate/run` | `metrics.json`, `prediction_NNN.npz` |
 | Paired DM/HAC and Holm; comparison plots | `bpfbi/cli.py:compare` | `bpfbi compare ...`, `bpfbi plot ...` |
 
-The supplied implementation is separate from the paper's reported results. Local/FedAvg/FedProx/FedPer and no-debt/no-calibration variants are executable; the local baseline updates every building each round, so a comparison to a subsampled federation must explicitly match optimizer-step budgets through its training budget; Seasonal Naive, XGBoost, pooled centralized TCN, SCAFFOLD, Ditto and external selector baselines are not bundled. Synthetic corruption targets an approximate fraction of hourly entries rather than guaranteeing exactly 30% of development windows; callers needing that exact experimental panel must export its frozen event ledger. The debt increment generalizes 12/48 to `clients_per_round/client_count`. The finite-sample validation quantile is used as a fixed local calibration expansion. The script reports communication payload and FLOP proxies, not measured distributed-network or energy costs.
+The supplied implementation is separate from the paper's reported results. Local/FedAvg/FedProx/FedPer and no-debt/no-calibration variants are executable; the local baseline requires the reference `--match-run history.json` and uses exactly the same selected clients in each round; with the same batch size/local epochs it records equal per-client optimizer-step counts; Seasonal Naive, XGBoost, pooled centralized TCN, SCAFFOLD, Ditto and external selector baselines are not bundled. Synthetic corruption now targets windows exactly and exports the event ledger. Event precision/recall therefore refers to runs of window-end detection labels on the decision grid. The debt increment generalizes 12/48 to `clients_per_round/client_count`. The finite-sample validation quantile is used as a fixed local calibration expansion. The script reports communication payload and FLOP proxies, not measured distributed-network or energy costs.
 
 Actual environment: Python 3.13.5, PyTorch 2.7.1+cu118, NumPy 2.1.3, SciPy 1.15.3, CPU, seed 11.
 

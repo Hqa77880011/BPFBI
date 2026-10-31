@@ -37,11 +37,18 @@ def main():
     assert model.encoder.input.weight.grad.abs().sum()>0 and model.head.weight.grad.abs().sum()>0
     optimizer.step();assert not torch.equal(before,model.encoder.input.weight)
     for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration'):
+        extra=['--match-run',root/'full/history.json'] if method=='local' else []
         invoke('run','--data',data,'--output',root/method,'--method',method,'--rounds',1,
-            '--clients-per-round',2,'--availability-probability',1,'--local-epochs',1,'--width',4,'--batch-size',64,'--bootstrap',20)
+            '--clients-per-round',2,'--availability-probability',1,'--local-epochs',1,'--width',4,'--batch-size',64,'--bootstrap',20,*extra)
         metrics=json.loads((root/method/'metrics.json').read_text())
         assert np.isfinite(metrics['mean_nrmse'])
         assert sum(metrics['participation'])==2
+    a=json.loads((root/'full/metrics.json').read_text());b=json.loads((root/'local/metrics.json').read_text())
+    assert a['optimizer_steps']==b['optimizer_steps']
+    from bpfbi.data import interpolate_short
+    np.testing.assert_allclose(interpolate_short([0,np.nan,np.nan,3]),[0,1,2,3])
+    assert np.isnan(interpolate_short([0,np.nan,np.nan,np.nan,np.nan,5])[1:5]).all()
+    assert values['train_anomaly'].sum()==round(.15*len(values['train_y']))
     invoke('evaluate','--data',data,'--model',root/'full/model_000.pt','--output',root/'frozen')
     a=np.load(root/'full/prediction_000.npz');b=np.load(root/'frozen/predictions.npz')
     np.testing.assert_allclose(a['prediction'],b['prediction'],rtol=1e-5,atol=1e-6)

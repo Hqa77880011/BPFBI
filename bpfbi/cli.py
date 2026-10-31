@@ -97,12 +97,20 @@ def run(args):
     schedule = np.load(args.availability, allow_pickle=False) if args.availability else rng.random((args.rounds, count)) < args.availability_probability
     if schedule.shape != (args.rounds, count):
         raise ValueError("Availability must have shape rounds by client count")
+    matched = json.loads(Path(args.match_run).read_text(encoding="utf-8")) if args.match_run else None
+    if matched is not None and len(matched) != args.rounds:
+        raise ValueError("Matched reference history must have exactly --rounds rounds")
+    steps = np.zeros(count,dtype=int)
     history, total_bytes, total_flops, downloaded = [], 0, 0.0, 0
     started = time.perf_counter()
     for round_index in range(args.rounds):
         available = schedule[round_index].astype(bool)
-        if args.method == "local":
-            selected = np.arange(count)
+        if matched is not None:
+            selected = np.asarray(matched[round_index]["clients"],dtype=int)
+            if (selected<0).any() or (selected>=count).any() or len(set(selected))!=len(selected):
+                raise ValueError("Invalid matched client identities")
+        elif args.method == "local":
+            raise ValueError("Local matched-budget baseline requires --match-run reference/history.json")
         else:
             value = utility + (0 if args.method == "no_debt" else 0.30 * debt) - 0.20 * operations / max(operations.max(), 1)
             if args.method in ("fedavg", "fedprox", "fedper"):
@@ -135,6 +143,7 @@ def run(args):
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
+                    steps[client] += 1
             estimate = predict(model, validation[client], args.device, args.batch_size)
             val_loss = float(np.mean((estimate[:, 0] - validation[client].y) ** 2))
             improvement = max(0, last_loss[client] - val_loss) if np.isfinite(last_loss[client]) else 0.001
@@ -159,7 +168,7 @@ def run(args):
         selected_mask[selected] = 1
         debt = np.clip(debt + limit_count / count - selected_mask, 0, 1)
         history.append(dict(round=round_index + 1, clients=selected.tolist(), validation_mse=values, debt=debt.tolist(),
-                            uploaded_bytes=total_bytes, flop_proxy=total_flops))
+                            uploaded_bytes=total_bytes, flop_proxy=total_flops, optimizer_steps=steps.tolist()))
     all_metrics = []
     for client, (model, values) in enumerate(zip(models, data)):
         if args.method != "local":
@@ -182,7 +191,7 @@ def run(args):
     summary = dict(config=vars(args), clients=all_metrics, mean_nrmse=float(nrmse.mean()), worst_nrmse=float(nrmse.max()),
                    client_std=float(nrmse.std()), mean_nrmse_ci=np.quantile(boot, [0.025, 0.975]).tolist(),
                    uploaded_mib=total_bytes / 1024 ** 2, downloaded_mib=downloaded / 1024 ** 2,
-                   flop_proxy=total_flops, completed_rounds=len(history), participation=participation.tolist(),
+                   flop_proxy=total_flops, completed_rounds=len(history), participation=participation.tolist(), optimizer_steps=steps.tolist(),
                    runtime_seconds=time.perf_counter() - started, shared_parameters=sum(t.numel() for t in shared.values()))
     for key in ("picp", "mpiw", "winkler", "event_f1", "auprc", "detection_delay_hours"):
         finite = [row[key] for row in all_metrics if row[key] is not None]
@@ -263,6 +272,7 @@ def main():
     train.add_argument("--upload-budget", type=int)
     train.add_argument("--flop-budget", type=float)
     train.add_argument("--availability")
+    train.add_argument("--match-run", help="Reference history.json for exact per-client optimizer-step matching")
     train.add_argument("--availability-probability", type=float, default=0.9)
     train.add_argument("--device", default="cpu")
     train.add_argument("--seed", type=int, default=11)
