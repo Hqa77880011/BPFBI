@@ -85,3 +85,18 @@ For the paper's multiplicity family, supply all primary baseline runs together. 
 ```bash
 bpfbi compare --first outputs/full --second outputs/fedavg outputs/fedper --output outputs/paired_primary.json --hac-lag 24
 ```
+
+## Classical baseline entry
+
+```bash
+python -m pip install -e .[classical]
+python -m bpfbi.classical --data data/hour1 --output outputs/seasonal --method seasonal_naive --period 24
+python -m bpfbi.classical --data data/hour1 --output outputs/xgboost --method xgboost --trees 100
+python -m bpfbi.classical --data data/hour1 --output outputs/xgboost_frozen --method xgboost --checkpoint-dir outputs/xgboost
+python verify.py
+python verify_classical.py
+```
+
+SeasonalNaive repeats the reading one declared period before the forecast target; period=24 covers horizons1/6/24. Train residual quantiles form local intervals, and the empirical training CDF of window seasonal deviations supplies its anomaly score. XGBoost uses the actual XGBRegressor quantile objective at 0.5/0.05/0.95 and XGBClassifier for the same window labels; both consume the same prepared causal inputs and reuse validation calibration/common metrics. Source/API: [XGBoost quantile regression](https://xgboost.readthedocs.io/en/release_2.1.0/python/examples/quantile_regression.html). No replacement tree model is called XGBoost. Classical training is outside federated optimizer-step accounting; the neural FLOP proxy is null, networking bytes zero, wall time measured.
+
+CPU checks fitted both baselines on the generated two-client fixture, loaded independent checkpoints and matched predictions, reused all common forecast/interval/event metrics, and hand-checked the seasonal index. Local XGBoost3.4.1 was installed into ignored outputs/xgb-deps only. SCAFFOLD, Ditto, pooled central and literature selector integrations continue separately.

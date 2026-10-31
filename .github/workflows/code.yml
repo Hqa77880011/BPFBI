@@ -9,6 +9,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install .
+      - run: pip install .[classical]
       - run: python -m compileall -q bpfbi
       - run: python -c "import bpfbi; import bpfbi.cli"
+      - run: python verify.py
+      - run: python verify_classical.py
