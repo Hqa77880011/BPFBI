@@ -96,10 +96,11 @@ def run(args):
     if args.method=="scaffold":message_bytes*=2
     debt, utility, participation = np.zeros(count), np.ones(count), np.zeros(count, dtype=int)
     last_loss = np.full(count, np.nan)
+    acsp_loss=np.zeros(count)
     operations = np.array([2 * sum(p.numel() for p in model.parameters()) * len(dataset) * dataset.window * args.local_epochs
                            for model, dataset in zip(models, training)], dtype=float)
     limit_count = min(args.clients_per_round, count)
-    byte_budget = args.upload_budget if args.upload_budget is not None else limit_count * message_bytes
+    byte_budget = args.upload_budget if args.upload_budget is not None else limit_count * message_bytes+(count*8 if args.method=="acsp_fl" else 0)
     flop_budget = args.flop_budget if args.flop_budget is not None else float(np.sort(operations)[-limit_count:].sum())
     schedule = np.load(args.availability, allow_pickle=False) if args.availability else rng.random((args.rounds, count)) < args.availability_probability
     if schedule.shape != (args.rounds, count):
@@ -118,6 +119,14 @@ def run(args):
                 raise ValueError("Invalid matched client identities")
         elif args.method in ("local","centralized"):
             raise ValueError("Local/centralized matched-budget baseline requires --match-run reference/history.json")
+        elif args.method=="acsp_fl":
+            from .selection import acsp_candidates
+            candidates=acsp_candidates(acsp_loss,round_index,args.acsp_decay)
+            selected=[];used_bytes=count*8;used_flops=0.
+            for client in candidates:
+                if available[client] and len(selected)<limit_count and used_bytes+message_bytes<=byte_budget and used_flops+operations[client]<=flop_budget:
+                    selected.append(client);used_bytes+=message_bytes;used_flops+=operations[client]
+            selected=np.asarray(selected,dtype=int)
         else:
             value = utility + (0 if args.method == "no_debt" else 0.30 * debt) - 0.20 * operations / max(operations.max(), 1)
             if args.method in ("fedavg", "fedprox", "fedper", "scaffold", "ditto"):
@@ -181,7 +190,7 @@ def run(args):
             values.append(val_loss)
             participation[client] += 1
         if len(selected) and args.method not in ("local","centralized"):
-            if global_method or args.method == "fedper":
+            if global_method or args.method in ("fedper","acsp_fl"):
                 weights = [1 if args.method=="scaffold" else len(training[client]) for client in selected]
             normalized = np.asarray(weights) / np.sum(weights)
             shared = {key: sum(float(weight) * value[key] for weight, value in zip(normalized, updates)) for key in shared}
@@ -194,11 +203,17 @@ def run(args):
         if args.method=="centralized":
             shared=copy.deepcopy(models[0].encoder.state_dict());global_head=copy.deepcopy(models[0].head.state_dict())
         total_flops += float(operations[selected].sum())
+        if args.method=="acsp_fl":
+            for client,model in enumerate(models):
+                model.encoder.load_state_dict(shared)
+                estimate=predict(model,validation[client],args.device,args.batch_size)
+                acsp_loss[client]=float(np.mean((estimate[:,0]-validation[client].y)**2))
+            total_bytes+=count*8;downloaded+=count*message_bytes
         selected_mask = np.zeros(count)
         selected_mask[selected] = 1
         debt = np.clip(debt + limit_count / count - selected_mask, 0, 1)
         history.append(dict(round=round_index + 1, clients=selected.tolist(), validation_mse=values, debt=debt.tolist(),
-                            uploaded_bytes=total_bytes, flop_proxy=total_flops, optimizer_steps=steps.tolist()))
+                            uploaded_bytes=total_bytes, flop_proxy=total_flops, optimizer_steps=steps.tolist(), acsp_validation_mse=acsp_loss.tolist() if args.method=="acsp_fl" else None))
     all_metrics = []
     for client, (model, values) in enumerate(zip(models, data)):
         if args.method=="ditto":model=personal[client]
@@ -292,13 +307,14 @@ def main():
     train = sub.add_parser("run")
     train.add_argument("--data", required=True)
     train.add_argument("--output", required=True)
-    train.add_argument("--method", choices=["full", "fedavg", "fedprox", "fedper", "local", "no_debt", "no_calibration", "centralized", "scaffold", "ditto"], default="full")
+    train.add_argument("--method", choices=["full", "fedavg", "fedprox", "fedper", "local", "no_debt", "no_calibration", "centralized", "scaffold", "ditto", "acsp_fl"], default="full")
     train.add_argument("--rounds", type=int, default=100)
     train.add_argument("--clients-per-round", type=int, default=12)
     train.add_argument("--local-epochs", type=int, default=2)
     train.add_argument("--width", type=int, default=64)
     train.add_argument("--batch-size", type=int, default=64)
     train.add_argument("--optimizer", choices=["adamw","sgd"], default="adamw")
+    train.add_argument("--acsp-decay", type=float, default=.01)
     train.add_argument("--ditto-lambda", type=float, default=.1)
     train.add_argument("--lr", type=float, default=0.001)
     train.add_argument("--weight-decay", type=float, default=0.00001)

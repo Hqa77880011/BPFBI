@@ -36,7 +36,7 @@ def main():
     assert torch.isfinite(loss);loss.backward()
     assert model.encoder.input.weight.grad.abs().sum()>0 and model.head.weight.grad.abs().sum()>0
     optimizer.step();assert not torch.equal(before,model.encoder.input.weight)
-    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration','centralized','scaffold','ditto'):
+    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration','centralized','scaffold','ditto','acsp_fl'):
         extra=['--match-run',root/'full/history.json'] if method in ('local','centralized') else []
         if method=='scaffold':extra+=['--optimizer','sgd']
         invoke('run','--data',data,'--output',root/method,'--method',method,'--rounds',1,
@@ -44,6 +44,8 @@ def main():
         metrics=json.loads((root/method/'metrics.json').read_text())
         assert np.isfinite(metrics['mean_nrmse'])
         assert sum(metrics['participation'])==2
+    from bpfbi.selection import acsp_candidates
+    np.testing.assert_equal(acsp_candidates([1,3,2],1,.5),[1])
     a=json.loads((root/'full/metrics.json').read_text());b=json.loads((root/'local/metrics.json').read_text())
     assert a['optimizer_steps']==b['optimizer_steps']
     for method in ('centralized','scaffold','ditto'):
@@ -66,7 +68,7 @@ def main():
     assert metrics['nrmse']==0 and metrics['picp']==1 and metrics['mpiw']==2 and metrics['winkler']==2
     invoke('compare','--first',root/'full','--second',root/'fedavg','--output',root/'comparison.json')
     invoke('plot','--metrics',root/'full/metrics.json',root/'fedavg/metrics.json','--output',root/'figures')
-    print(json.dumps(dict(status='passed',methods=10,rounds=1,checkpoint_equal=True,metric_example=True)))
+    print(json.dumps(dict(status='passed',methods=11,rounds=1,checkpoint_equal=True,metric_example=True)))
 
 
 if __name__=='__main__':main()
