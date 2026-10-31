@@ -36,15 +36,22 @@ def main():
     assert torch.isfinite(loss);loss.backward()
     assert model.encoder.input.weight.grad.abs().sum()>0 and model.head.weight.grad.abs().sum()>0
     optimizer.step();assert not torch.equal(before,model.encoder.input.weight)
-    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration'):
-        extra=['--match-run',root/'full/history.json'] if method=='local' else []
+    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration','centralized','scaffold','ditto'):
+        extra=['--match-run',root/'full/history.json'] if method in ('local','centralized') else []
+        if method=='scaffold':extra+=['--optimizer','sgd']
         invoke('run','--data',data,'--output',root/method,'--method',method,'--rounds',1,
-            '--clients-per-round',2,'--availability-probability',1,'--local-epochs',1,'--width',4,'--batch-size',64,'--bootstrap',20,*extra)
+            '--clients-per-round',2,'--availability-probability',1,'--local-epochs',2,'--width',4,'--batch-size',64,'--bootstrap',20,*extra)
         metrics=json.loads((root/method/'metrics.json').read_text())
         assert np.isfinite(metrics['mean_nrmse'])
         assert sum(metrics['participation'])==2
     a=json.loads((root/'full/metrics.json').read_text());b=json.loads((root/'local/metrics.json').read_text())
     assert a['optimizer_steps']==b['optimizer_steps']
+    for method in ('centralized','scaffold','ditto'):
+        c=json.loads((root/method/'metrics.json').read_text());assert c['optimizer_steps']==a['optimizer_steps']
+        invoke('evaluate','--data',data,'--model',root/method/'model_000.pt','--output',root/(method+'_frozen'))
+        np.testing.assert_allclose(np.load(root/method/'prediction_000.npz')['prediction'],np.load(root/(method+'_frozen')/'predictions.npz')['prediction'],rtol=1e-5,atol=1e-6)
+    a0=torch.load(root/'centralized/model_000.pt',weights_only=True)['state'];a1=torch.load(root/'centralized/model_001.pt',weights_only=True)['state']
+    assert all(torch.equal(a0[k],a1[k]) for k in a0)
     from bpfbi.data import interpolate_short
     np.testing.assert_allclose(interpolate_short([0,np.nan,np.nan,3]),[0,1,2,3])
     assert np.isnan(interpolate_short([0,np.nan,np.nan,np.nan,np.nan,5])[1:5]).all()
@@ -59,7 +66,7 @@ def main():
     assert metrics['nrmse']==0 and metrics['picp']==1 and metrics['mpiw']==2 and metrics['winkler']==2
     invoke('compare','--first',root/'full','--second',root/'fedavg','--output',root/'comparison.json')
     invoke('plot','--metrics',root/'full/metrics.json',root/'fedavg/metrics.json','--output',root/'figures')
-    print(json.dumps(dict(status='passed',methods=7,rounds=1,checkpoint_equal=True,metric_example=True)))
+    print(json.dumps(dict(status='passed',methods=10,rounds=1,checkpoint_equal=True,metric_example=True)))
 
 
 if __name__=='__main__':main()

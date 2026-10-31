@@ -85,8 +85,15 @@ def run(args):
     count = len(data)
     upload_bytes = sum(value.numel() * value.element_size() for value in shared.values())
     head_bytes = sum(value.numel() * value.element_size() for value in global_head.values())
-    global_method = args.method in ("fedavg", "fedprox")
+    global_method = args.method in ("fedavg", "fedprox", "scaffold", "ditto", "centralized")
+    if args.method=="scaffold" and args.optimizer!="sgd":
+        raise ValueError("SCAFFOLD option II requires --optimizer sgd; use the same optimizer for matched neural comparisons")
+    if args.method=="centralized":models=[models[0]]*len(data)
+    personal=[copy.deepcopy(model) for model in models] if args.method=="ditto" else None
+    control={name:torch.zeros_like(p) for name,p in models[0].named_parameters()}
+    client_control=[copy.deepcopy(control) for _ in models]
     message_bytes = upload_bytes + (head_bytes if global_method else 0)
+    if args.method=="scaffold":message_bytes*=2
     debt, utility, participation = np.zeros(count), np.ones(count), np.zeros(count, dtype=int)
     last_loss = np.full(count, np.nan)
     operations = np.array([2 * sum(p.numel() for p in model.parameters()) * len(dataset) * dataset.window * args.local_epochs
@@ -109,11 +116,11 @@ def run(args):
             selected = np.asarray(matched[round_index]["clients"],dtype=int)
             if (selected<0).any() or (selected>=count).any() or len(set(selected))!=len(selected):
                 raise ValueError("Invalid matched client identities")
-        elif args.method == "local":
-            raise ValueError("Local matched-budget baseline requires --match-run reference/history.json")
+        elif args.method in ("local","centralized"):
+            raise ValueError("Local/centralized matched-budget baseline requires --match-run reference/history.json")
         else:
             value = utility + (0 if args.method == "no_debt" else 0.30 * debt) - 0.20 * operations / max(operations.max(), 1)
-            if args.method in ("fedavg", "fedprox", "fedper"):
+            if args.method in ("fedavg", "fedprox", "fedper", "scaffold", "ditto"):
                 value = rng.random(count) + 1
             value = value + rng.uniform(0, 1e-9, count)
             result = milp(-value, integrality=np.ones(count), bounds=Bounds(np.zeros(count), available.astype(float)),
@@ -124,27 +131,46 @@ def run(args):
                 raise RuntimeError(f"Budget selection failed: {result.message}")
             selected = np.flatnonzero(result.x > 0.5)
         updates, heads, weights, values = [], [], [], []
+        control_delta=[]
         for client in selected:
             model = models[client]
-            if args.method != "local":
+            if args.method not in ("local","centralized"):
                 model.encoder.load_state_dict(shared)
                 if global_method:
                     model.head.load_state_dict(global_head)
             reference = {name: tensor.detach().clone() for name, tensor in model.encoder.named_parameters()}
-            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            optimizer_class=torch.optim.SGD if args.optimizer=="sgd" else torch.optim.AdamW
+            optimizer = optimizer_class(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            start_state={name:p.detach().clone() for name,p in model.named_parameters()}
+            if personal is not None:
+                personal_optimizer=optimizer_class(personal[client].parameters(),lr=args.lr,weight_decay=args.weight_decay)
+                personal[client].train()
+            round_steps=0
             model.train()
             generator = torch.Generator().manual_seed(args.seed + round_index * count + int(client))
             for _ in range(args.local_epochs):
                 for x, y, anomaly in DataLoader(training[client], batch_size=args.batch_size, shuffle=True, generator=generator):
-                    loss = objective(model(x.to(args.device)), y.to(args.device), anomaly.to(args.device))
+                    active_model=personal[client] if personal is not None and round_steps%2 else model
+                    active_optimizer=personal_optimizer if active_model is not model else optimizer
+                    loss = objective(active_model(x.to(args.device)), y.to(args.device), anomaly.to(args.device))
+                    if active_model is not model:
+                        loss=loss+args.ditto_lambda/2*sum((p-start_state[name]).square().sum() for name,p in active_model.named_parameters())
                     prox = 0.001 if args.method in ("full", "no_debt", "no_calibration", "fedprox") else 0
                     if prox:
                         loss = loss + prox / 2 * sum((p - reference[name]).square().sum() for name, p in model.encoder.named_parameters())
-                    optimizer.zero_grad()
+                    active_optimizer.zero_grad()
                     loss.backward()
-                    optimizer.step()
+                    if args.method=="scaffold":
+                        for name,p in model.named_parameters():p.grad.add_(control[name]-client_control[client][name])
+                    active_optimizer.step()
+                    round_steps+=1
                     steps[client] += 1
-            estimate = predict(model, validation[client], args.device, args.batch_size)
+            if personal is not None and round_steps<2:raise ValueError("Ditto requires at least two total steps per selected client")
+            if args.method=="scaffold":
+                new_control={name:client_control[client][name]-control[name]+(start_state[name]-p.detach())/(round_steps*args.lr) for name,p in model.named_parameters()}
+                control_delta.append({name:new_control[name]-client_control[client][name] for name in control})
+                client_control[client]=new_control
+            estimate = predict(personal[client] if personal is not None else model, validation[client], args.device, args.batch_size)
             val_loss = float(np.mean((estimate[:, 0] - validation[client].y) ** 2))
             improvement = max(0, last_loss[client] - val_loss) if np.isfinite(last_loss[client]) else 0.001
             utility[client] = 0.8 * utility[client] + 0.2 * improvement
@@ -154,15 +180,19 @@ def run(args):
             heads.append({name: value.detach().clone() for name, value in model.head.state_dict().items()})
             values.append(val_loss)
             participation[client] += 1
-        if len(selected) and args.method != "local":
+        if len(selected) and args.method not in ("local","centralized"):
             if global_method or args.method == "fedper":
-                weights = [len(training[client]) for client in selected]
+                weights = [1 if args.method=="scaffold" else len(training[client]) for client in selected]
             normalized = np.asarray(weights) / np.sum(weights)
             shared = {key: sum(float(weight) * value[key] for weight, value in zip(normalized, updates)) for key in shared}
             if global_method:
                 global_head = {key: sum(float(weight) * value[key] for weight, value in zip(normalized, heads)) for key in global_head}
+            if args.method=="scaffold":
+                control={name:control[name]+sum(delta[name] for delta in control_delta)/count for name in control}
             total_bytes += len(selected) * message_bytes
             downloaded += len(selected) * message_bytes
+        if args.method=="centralized":
+            shared=copy.deepcopy(models[0].encoder.state_dict());global_head=copy.deepcopy(models[0].head.state_dict())
         total_flops += float(operations[selected].sum())
         selected_mask = np.zeros(count)
         selected_mask[selected] = 1
@@ -171,7 +201,8 @@ def run(args):
                             uploaded_bytes=total_bytes, flop_proxy=total_flops, optimizer_steps=steps.tolist()))
     all_metrics = []
     for client, (model, values) in enumerate(zip(models, data)):
-        if args.method != "local":
+        if args.method=="ditto":model=personal[client]
+        if args.method not in ("local","ditto","centralized"):
             model.encoder.load_state_dict(shared)
             if global_method:
                 model.head.load_state_dict(global_head)
@@ -261,12 +292,14 @@ def main():
     train = sub.add_parser("run")
     train.add_argument("--data", required=True)
     train.add_argument("--output", required=True)
-    train.add_argument("--method", choices=["full", "fedavg", "fedprox", "fedper", "local", "no_debt", "no_calibration"], default="full")
+    train.add_argument("--method", choices=["full", "fedavg", "fedprox", "fedper", "local", "no_debt", "no_calibration", "centralized", "scaffold", "ditto"], default="full")
     train.add_argument("--rounds", type=int, default=100)
     train.add_argument("--clients-per-round", type=int, default=12)
     train.add_argument("--local-epochs", type=int, default=2)
     train.add_argument("--width", type=int, default=64)
     train.add_argument("--batch-size", type=int, default=64)
+    train.add_argument("--optimizer", choices=["adamw","sgd"], default="adamw")
+    train.add_argument("--ditto-lambda", type=float, default=.1)
     train.add_argument("--lr", type=float, default=0.001)
     train.add_argument("--weight-decay", type=float, default=0.00001)
     train.add_argument("--upload-budget", type=int)
