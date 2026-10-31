@@ -78,3 +78,9 @@ python verify.py --output outputs/functional-check
 The supplied implementation is separate from the paper's reported results. Matched local/FedAvg/FedProx/FedPer and no-debt/no-calibration variants are executable; Seasonal Naive, XGBoost, pooled centralized TCN, SCAFFOLD, Ditto and external selector baselines are not bundled. Synthetic corruption targets an approximate fraction of hourly entries rather than guaranteeing exactly 30% of development windows; callers needing that exact experimental panel must export its frozen event ledger. The debt increment generalizes 12/48 to `clients_per_round/client_count`. The finite-sample validation quantile is used as a fixed local calibration expansion. The script reports communication payload and FLOP proxies, not measured distributed-network or energy costs.
 
 Actual environment: Python 3.13.5, PyTorch 2.7.1+cu118, NumPy 2.1.3, SciPy 1.15.3, CPU, seed 11.
+
+For the paper's multiplicity family, supply all primary baseline runs together. `compare` applies Holm correction across those baselines separately within each building:
+
+```bash
+bpfbi compare --first outputs/full --second outputs/fedavg outputs/fedper --output outputs/paired_primary.json --hac-lag 24
+```

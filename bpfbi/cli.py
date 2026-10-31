@@ -192,25 +192,29 @@ def run(args):
 
 
 def compare(args):
-    first, second = Path(args.first), Path(args.second)
+    first = Path(args.first)
     rows = []
-    for path in sorted(first.glob("prediction_*.npz")):
-        with np.load(path, allow_pickle=False) as a, np.load(second / path.name, allow_pickle=False) as b:
-            if not np.array_equal(a["time"], b["time"]) or not np.array_equal(a["y"], b["y"]):
-                raise ValueError("Paired comparisons require identical target records")
-            difference = a["squared_error"] - b["squared_error"]
-            centered = difference - difference.mean()
-            lag = min(args.hac_lag, len(difference) - 1)
-            variance = np.dot(centered, centered) / len(difference)
-            for offset in range(1, lag + 1):
-                variance += 2 * (1 - offset / (lag + 1)) * np.dot(centered[offset:], centered[:-offset]) / len(difference)
-            statistic = float(difference.mean() / np.sqrt(max(variance, 1e-12) / len(difference)))
-            rows.append(dict(client=path.stem, mse_difference=float(difference.mean()), dm=statistic, p=float(2 * norm.sf(abs(statistic)))))
-    order = np.argsort([row["p"] for row in rows])
-    maximum = 0.0
-    for rank, index in enumerate(order):
-        maximum = max(maximum, min(1, (len(rows) - rank) * rows[index]["p"]))
-        rows[index]["holm_p"] = maximum
+    for baseline in args.second:
+        second = Path(baseline)
+        for path in sorted(first.glob("prediction_*.npz")):
+            with np.load(path, allow_pickle=False) as a, np.load(second / path.name, allow_pickle=False) as b:
+                if not np.array_equal(a["time"], b["time"]) or not np.array_equal(a["y"], b["y"]):
+                    raise ValueError("Paired comparisons require identical target records")
+                difference = a["squared_error"] - b["squared_error"]
+                centered = difference - difference.mean()
+                lag = min(args.hac_lag, len(difference) - 1)
+                variance = np.dot(centered, centered) / len(difference)
+                for offset in range(1, lag + 1):
+                    variance += 2 * (1 - offset / (lag + 1)) * np.dot(centered[offset:], centered[:-offset]) / len(difference)
+                statistic = float(difference.mean() / np.sqrt(max(variance, 1e-12) / len(difference)))
+                rows.append(dict(baseline=second.name, client=path.stem, mse_difference=float(difference.mean()),
+                                 dm=statistic, p=float(2 * norm.sf(abs(statistic)))))
+    for client in {row["client"] for row in rows}:
+        family = sorted([row for row in rows if row["client"] == client], key=lambda row: row["p"])
+        maximum = 0.0
+        for rank, row in enumerate(family):
+            maximum = max(maximum, min(1, (len(family) - rank) * row["p"]))
+            row["holm_p"] = maximum
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(rows, indent=2), encoding="utf-8")
@@ -272,7 +276,7 @@ def main():
     evaluation.add_argument("--device", default="cpu")
     paired = sub.add_parser("compare")
     paired.add_argument("--first", required=True)
-    paired.add_argument("--second", required=True)
+    paired.add_argument("--second", nargs="+", required=True)
     paired.add_argument("--output", required=True)
     paired.add_argument("--hac-lag", type=int, default=24)
     plot = sub.add_parser("plot")
