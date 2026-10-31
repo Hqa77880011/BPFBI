@@ -216,6 +216,23 @@ def compare(args):
     output.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
+def evaluate_checkpoint(args):
+    """Evaluate a frozen client checkpoint using the saved local calibration."""
+    root = Path(args.data)
+    manifest = json.loads((root / "clients.json").read_text(encoding="utf-8"))
+    with np.load(root / manifest[args.client]["file"], allow_pickle=False) as archive:
+        values = {key: archive[key] for key in archive.files}
+    checkpoint = torch.load(args.model, map_location=args.device, weights_only=True)
+    model = BuildingModel(values["train_features"].shape[1], checkpoint["config"]["width"]).to(args.device)
+    model.load_state_dict(checkpoint["state"])
+    prediction = predict(model, Windows(values, "test"), args.device, args.batch_size)
+    metrics, arrays = evaluate(prediction, values, checkpoint["calibration"])
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "metrics.json").write_text(json.dumps(metrics, indent=2, allow_nan=False), encoding="utf-8")
+    np.savez_compressed(output / "predictions.npz", **arrays)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -246,6 +263,13 @@ def main():
     train.add_argument("--device", default="cpu")
     train.add_argument("--seed", type=int, default=11)
     train.add_argument("--bootstrap", type=int, default=10000)
+    evaluation = sub.add_parser("evaluate")
+    evaluation.add_argument("--data", required=True)
+    evaluation.add_argument("--model", required=True)
+    evaluation.add_argument("--client", type=int, default=0)
+    evaluation.add_argument("--output", required=True)
+    evaluation.add_argument("--batch-size", type=int, default=64)
+    evaluation.add_argument("--device", default="cpu")
     paired = sub.add_parser("compare")
     paired.add_argument("--first", required=True)
     paired.add_argument("--second", required=True)
@@ -263,6 +287,8 @@ def main():
         if min(args.rounds, args.local_epochs, args.batch_size, args.clients_per_round, args.bootstrap, args.lr) <= 0:
             parser.error("Training sizes and learning rate must be positive")
         run(args)
+    elif args.command == "evaluate":
+        evaluate_checkpoint(args)
     elif args.command == "compare":
         compare(args)
     else:

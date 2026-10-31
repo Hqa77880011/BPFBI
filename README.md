@@ -10,7 +10,7 @@ Requires Python `>=3.11`. Run from the repository root in an activated environme
 python -m pip install -e .
 ```
 
-Inspection environment: Python 3.13.5; numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, scikit-learn 1.6.1, matplotlib 3.10.0, pandas 2.2.3. Checks: Python syntax, configuration parsing and CLI/source argument matching. Training and full evaluation were not run.
+Inspection environment: Python 3.13.5; numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, scikit-learn 1.6.1, matplotlib 3.10.0, pandas 2.2.3. CPU validation: `python verify.py` checks chronological train-only normalization, finite local losses, encoder/head gradients and parameter updates, all seven methods for one communication round, frozen checkpoint evaluation, hand-calculated nRMSE/PICP/MPIW/Winkler examples, paired comparison and figures. Generated two-client readings test functionality; full BDG2/REFIT experiments were not run.
 
 ## Data and preprocessing
 
@@ -58,3 +58,23 @@ Each `--output` contains `model_NNN.pt`, `prediction_NNN.npz`, `history.json` an
 bpfbi compare --first outputs/full --second outputs/fedper --output outputs/paired.json --hac-lag 24
 bpfbi plot --metrics outputs/full/metrics.json outputs/fedper/metrics.json outputs/no_debt/metrics.json --output outputs/figures
 ```
+
+## Frozen evaluation and implementation mapping
+
+```bash
+bpfbi evaluate --data data/hour1 --model outputs/full/model_000.pt --client 0 --output outputs/frozen_client0
+python verify.py --output outputs/functional-check
+```
+
+`--client` is the zero-based index in `clients.json`; it must match the checkpoint's model suffix. Frozen evaluation reuses the saved calibration without refitting or selecting on test labels.
+
+| Paper component / metric | Code | Command / configuration |
+|---|---|---|
+| Causal TCN, median/ordered quantiles/anomaly head, Huber+pinball+BCE+proximal loss | `bpfbi/model.py`, `bpfbi/cli.py:run` | `bpfbi run --method full ...` |
+| Availability/budget selection, debt and capped utility aggregation | `bpfbi/cli.py:run` | `--upload-budget`, `--flop-budget`, `--availability` |
+| nRMSE (mean/worst/SD/CI), PICP, MPIW, Winkler, event F1/AUPRC/delay, bytes/FLOP proxy/participation | `bpfbi/cli.py:evaluate/run` | `metrics.json`, `prediction_NNN.npz` |
+| Paired DM/HAC and Holm; comparison plots | `bpfbi/cli.py:compare` | `bpfbi compare ...`, `bpfbi plot ...` |
+
+The supplied implementation is separate from the paper's reported results. Matched local/FedAvg/FedProx/FedPer and no-debt/no-calibration variants are executable; Seasonal Naive, XGBoost, pooled centralized TCN, SCAFFOLD, Ditto and external selector baselines are not bundled. Synthetic corruption targets an approximate fraction of hourly entries rather than guaranteeing exactly 30% of development windows; callers needing that exact experimental panel must export its frozen event ledger. The debt increment generalizes 12/48 to `clients_per_round/client_count`. The finite-sample validation quantile is used as a fixed local calibration expansion. The script reports communication payload and FLOP proxies, not measured distributed-network or energy costs.
+
+Actual environment: Python 3.13.5, PyTorch 2.7.1+cu118, NumPy 2.1.3, SciPy 1.15.3, CPU, seed 11.
