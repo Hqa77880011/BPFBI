@@ -36,14 +36,26 @@ def main():
     assert torch.isfinite(loss);loss.backward()
     assert model.encoder.input.weight.grad.abs().sum()>0 and model.head.weight.grad.abs().sum()>0
     optimizer.step();assert not torch.equal(before,model.encoder.input.weight)
-    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration','centralized','scaffold','ditto','acsp_fl'):
+    np.savez(root/'resources.npz',energy=np.ones((2,2)),delay=np.array([[1.,2.],[2.,1.]]),budget=np.full(2,10.))
+    for method in ('full','fedavg','fedprox','fedper','local','no_debt','no_calibration','centralized','scaffold','ditto','acsp_fl','eacs_fl'):
         extra=['--match-run',root/'full/history.json'] if method in ('local','centralized') else []
         if method=='scaffold':extra+=['--optimizer','sgd']
+        if method=='eacs_fl':extra+=['--resource-trace',root/'resources.npz']
         invoke('run','--data',data,'--output',root/method,'--method',method,'--rounds',1,
             '--clients-per-round',2,'--availability-probability',1,'--local-epochs',2,'--width',4,'--batch-size',64,'--bootstrap',20,*extra)
         metrics=json.loads((root/method/'metrics.json').read_text())
         assert np.isfinite(metrics['mean_nrmse'])
         assert sum(metrics['participation'])==2
+    invoke('run','--data',data,'--output',root/'eacs_late','--method','eacs_fl','--resource-trace',root/'resources.npz','--maximum-delay','.5','--rounds',1,'--clients-per-round',2,'--availability-probability',1,'--local-epochs',1,'--width',4,'--batch-size',64,'--bootstrap',20)
+    assert json.loads((root/'eacs_late/metrics.json').read_text())['resource_protocol']['deadline_failures']==2
+    with torch.random.fork_rng():
+        torch.manual_seed(11);initial=BuildingModel(x.shape[-1],4).state_dict()
+    excluded=torch.load(root/'eacs_late/model_000.pt',weights_only=True)['state']
+    assert all(torch.equal(initial[key],excluded[key]) for key in initial)
+    from bpfbi.resource_protocol import EACS
+    resource=EACS(root/'resources.npz',2,1,1)
+    np.testing.assert_equal(resource.ranking(0,[True,True]),[0,1]);resource.observe(0,[0])
+    assert resource.delay[0]==1.5 and resource.spent[0]==1 and resource.pulls[0]==2
     from bpfbi.selection import acsp_candidates
     np.testing.assert_equal(acsp_candidates([1,3,2],1,.5),[1])
     a=json.loads((root/'full/metrics.json').read_text());b=json.loads((root/'local/metrics.json').read_text())
@@ -68,7 +80,7 @@ def main():
     assert metrics['nrmse']==0 and metrics['picp']==1 and metrics['mpiw']==2 and metrics['winkler']==2
     invoke('compare','--first',root/'full','--second',root/'fedavg','--output',root/'comparison.json')
     invoke('plot','--metrics',root/'full/metrics.json',root/'fedavg/metrics.json','--output',root/'figures')
-    print(json.dumps(dict(status='passed',methods=11,rounds=1,checkpoint_equal=True,metric_example=True)))
+    print(json.dumps(dict(status='passed',methods=12,rounds=1,checkpoint_equal=True,metric_example=True)))
 
 
 if __name__=='__main__':main()
