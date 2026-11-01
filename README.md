@@ -1,6 +1,6 @@
 # BPFBI
 
-Implementation of **Budgeted Personalized Federated Building Intelligence for Load Forecasting, Calibrated Intervals, and Anomaly Detection**.
+**Budgeted Personalized Federated Building Intelligence for Load Forecasting, Calibrated Intervals, and Anomaly Detection**.
 
 ## Installation
 
@@ -9,8 +9,6 @@ Requires Python `>=3.11`. Run from the repository root in an activated environme
 ```bash
 python -m pip install -e .
 ```
-
-Inspection environment: Python 3.13.5; numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, scikit-learn 1.6.1, matplotlib 3.10.0, pandas 2.2.3. CPU validation: `python verify.py` checks chronological train-only normalization, finite local losses, encoder/head gradients and parameter updates, all seven methods for one communication round, frozen checkpoint evaluation, hand-calculated nRMSE/PICP/MPIW/Winkler examples, paired comparison and figures. Generated two-client readings test functionality; full BDG2/REFIT experiments were not run.
 
 ## Data and preprocessing
 
@@ -60,7 +58,7 @@ bpfbi compare --first outputs/full --second outputs/fedper --output outputs/pair
 bpfbi plot --metrics outputs/full/metrics.json outputs/fedper/metrics.json outputs/no_debt/metrics.json --output outputs/figures
 ```
 
-## Frozen evaluation and implementation mapping
+## Frozen evaluation and modules
 
 ```bash
 bpfbi evaluate --data data/hour1 --model outputs/full/model_000.pt --client 0 --output outputs/frozen_client0
@@ -69,18 +67,16 @@ python verify.py --output outputs/functional-check
 
 `--client` is the zero-based index in `clients.json`; it must match the checkpoint's model suffix. Frozen evaluation reuses the saved calibration without refitting or selecting on test labels.
 
-| Paper component / metric | Code | Command / configuration |
+| Component / metric | Code | Command / configuration |
 |---|---|---|
 | Causal TCN, median/ordered quantiles/anomaly head, Huber+pinball+BCE+proximal loss | `bpfbi/model.py`, `bpfbi/cli.py:run` | `bpfbi run --method full ...` |
 | Availability/budget selection, debt and capped utility aggregation | `bpfbi/cli.py:run` | `--upload-budget`, `--flop-budget`, `--availability` |
 | nRMSE (mean/worst/SD/CI), PICP, MPIW, Winkler, event F1/AUPRC/delay, bytes/FLOP proxy/participation | `bpfbi/cli.py:evaluate/run` | `metrics.json`, `prediction_NNN.npz` |
 | Paired DM/HAC and Holm; comparison plots | `bpfbi/cli.py:compare` | `bpfbi compare ...`, `bpfbi plot ...` |
 
-The supplied implementation is separate from the paper's reported results. Local/FedAvg/FedProx/FedPer and no-debt/no-calibration variants are executable; the local baseline requires the reference `--match-run history.json` and uses exactly the same selected clients in each round; with the same batch size/local epochs it records equal per-client optimizer-step counts; Seasonal Naive, XGBoost, pooled centralized TCN, SCAFFOLD, Ditto, ACSP-FL and EACS-FL are documented and executable below. Synthetic corruption now targets windows exactly and exports the event ledger. Event precision/recall therefore refers to runs of window-end detection labels on the decision grid. The debt increment generalizes 12/48 to `clients_per_round/client_count`. The finite-sample validation quantile is used as a fixed local calibration expansion. The script reports communication payload and FLOP proxies; EACS additionally requires externally measured resource telemetry rather than converting FLOPs to energy.
+Local training requires `--match-run history.json` to replay selected clients and match per-client optimizer-step counts at equal batch size/local epochs. Event metrics use runs of window-end labels. Debt increments by `clients_per_round/client_count`; local calibration uses a fixed finite-sample validation quantile. Communication counts payload bytes and compute uses a FLOP proxy. EACS requires measured resource telemetry.
 
-Actual environment: Python 3.13.5, PyTorch 2.7.1+cu118, NumPy 2.1.3, SciPy 1.15.3, CPU, seed 11.
-
-For the paper's multiplicity family, supply all primary baseline runs together. `compare` applies Holm correction across those baselines separately within each building:
+Supply all primary comparison runs together; `compare` applies Holm correction across baselines within each building:
 
 ```bash
 bpfbi compare --first outputs/full --second outputs/fedavg outputs/fedper --output outputs/paired_primary.json --hac-lag 24
@@ -97,21 +93,16 @@ python verify.py
 python verify_classical.py
 ```
 
-SeasonalNaive repeats the reading one declared period before the forecast target; period=24 covers horizons1/6/24. Train residual quantiles form local intervals, and the empirical training CDF of window seasonal deviations supplies its anomaly score. XGBoost uses the actual XGBRegressor quantile objective at 0.5/0.05/0.95 and XGBClassifier for the same window labels; both consume the same prepared causal inputs and reuse validation calibration/common metrics. Source/API: [XGBoost quantile regression](https://xgboost.readthedocs.io/en/release_2.1.0/python/examples/quantile_regression.html). No replacement tree model is called XGBoost. Classical training is outside federated optimizer-step accounting; the neural FLOP proxy is null, networking bytes zero, wall time measured.
-
-CPU checks fitted both baselines on the generated two-client fixture, loaded independent checkpoints and matched predictions, reused all common forecast/interval/event metrics, and hand-checked the seasonal index. Local XGBoost3.4.1 was installed into ignored outputs/xgb-deps only. SCAFFOLD, Ditto, pooled central and literature selector integrations follow below.
-
+SeasonalNaive repeats the value one period before the target (`--period 24` supports horizons 1/6/24). Training residual quantiles define intervals; the training CDF of seasonal deviations defines anomaly scores. XGBoost fits quantile regressors at 0.5/0.05/0.95 and a classifier using the same causal inputs, validation calibration and metrics. API: [XGBoost quantile regression](https://xgboost.readthedocs.io/en/release_2.1.0/python/examples/quantile_regression.html). Classical fits report measured wall time, zero network bytes and no neural FLOP proxy.
 
 The common neural CLI also provides `--method centralized|scaffold|ditto`. Centralized TCN uses a single pooled model and the predeclared reference client-batch ordering; `--match-run reference/history.json` gives exactly the corresponding per-client/total optimizer-step budget and no network messages. Its optimizer resets at the same client-chunk boundaries as the federation simulator.
 
 SCAFFOLD is an independent implementation of [Algorithm 1, option II](https://proceedings.mlr.press/v119/karimireddy20a/karimireddy20a.pdf): gradients are corrected by c-c_i, c_i is updated by c_i-c+(w_start-w_end)/(K*lr), and server control deltas are divided by the full client population. Model aggregation is uniform as in that algorithm. `--optimizer sgd` is required; use the same flag for all neural comparisons involving SCAFFOLD. Controls count as an additional full-model payload in both upload and download ledgers. AdamW remains available for the other common-optimizer experiments.
 
-Ditto independently implements [Algorithm 1](https://proceedings.mlr.press/v139/li21h/li21h.pdf), keeping persistent private models and separate globally aggregated full models. Private gradients include lambda*(v-w_start), with `--ditto-lambda 0.1` an explicit development parameter. Under the fixed total optimization budget, minibatches alternate global/private updates (ceil(K/2), floor(K/2)); K>=2 is required. Both updates count toward total steps and the compute proxy. Only the global model is transmitted, while frozen evaluation uses the private models. The split is an explicit matched-work choice rather than the paper's unspecified historical personal-step count. Functional `python verify.py` runs all ten neural methods, checks equal total budgets, identical pooled checkpoints across clients, gradients/updates, frozen checkpoint predictions and a hand-calculated interval example. It does not run the reported building benchmark.
+Ditto follows [Algorithm 1](https://proceedings.mlr.press/v139/li21h/li21h.pdf), maintaining private models and separate aggregated global models. Private gradients add `lambda*(v-w_start)` (`--ditto-lambda 0.1`). Minibatches alternate global/private updates within a total K-step budget: ceil(K/2) global and floor(K/2) private, requiring K>=2. Both count toward compute; only global weights are transmitted and frozen evaluation uses private weights.
 
+`--method acsp_fl` adapts [ACSP-FL](https://arxiv.org/abs/2411.17833) equations (4)-(7) / Algorithms 1-2 to the shared TCN and regression validation metric. The original MIT [AllanMSouza/ACSP-FL](https://github.com/AllanMSouza/ACSP-FL) source was checked at commit 187fe05f64746e1b68b57319d32903df645e1410; its license is retained in bpfbi/vendor/acsp/LICENSE. The original accuracy ranking is mapped to negative validation MSE: after all-client validation with the newly aggregated shared encoder and private heads, clients at or above mean MSE remain eligible, ordered worst first, and their number decays as ceil(eligible_count*(1-decay)^round), with `--acsp-decay .01`. Equation (4)'s inclusive comparison is followed, including ties. Encoder-only sample-count aggregation and private heads preserve the layer-sharing mechanism. First-round clients are eligible before filtering, as in Algorithm 1. Availability, byte, compute and cardinality caps then trim the list. A round's all-client validation broadcast and float64 metric replies are included in download/upload ledgers; default upload caps include those replies.
 
-`--method acsp_fl` adapts [ACSP-FL](https://arxiv.org/abs/2411.17833) equations (4)-(7) / Algorithms 1-2 to the shared TCN and regression validation metric. The original MIT [AllanMSouza/ACSP-FL](https://github.com/AllanMSouza/ACSP-FL) source was checked at commit 187fe05f64746e1b68b57319d32903df645e1410; its license is retained in bpfbi/vendor/acsp/LICENSE. The original accuracy ranking is mapped to negative validation MSE: after all-client validation with the newly aggregated shared encoder and private heads, clients at or above mean MSE remain eligible, ordered worst first, and their number decays as ceil(eligible_count*(1-decay)^round), with `--acsp-decay .01`. Equation (4)'s inclusive comparison is followed, including ties. Encoder-only sample-count aggregation and private heads preserve the layer-sharing mechanism. First-round clients are eligible before filtering, as in Algorithm 1. Availability and explicit byte/compute/cardinality caps then trim that ordered list; this is the building protocol adaptation, and can reduce the variable count further. A round's all-client validation broadcast and float64 metric replies are included in download/upload ledgers; default upload caps include those replies. This implementation does not relabel the PFBI utility/debt selector as ACSP-FL. The hand case MSE [1,3,2], round 1 and decay .5 selects client 1; the actual common data/train/checkpoint/evaluation entry passes with eleven neural methods.
+`--method eacs_fl --resource-trace path.npz` implements the EACS-FL resource protocol as the single-global-model special case of [Zhu et al., Computer Networks 2024](https://par.nsf.gov/servlets/purl/10535691), equations (3)-(10) and Algorithm 1. A required external trace supplies energy/delay arrays shaped [rounds+1,clients] and per-client budget[clients]. Row0 holds preflight observations already available before replay; budgets apply to the subsequent replay. In each round, the selection score is V*historical_mean_delay + energy_queue*historical_mean_energy - sqrt((K+1)*log(t)/pulls). Costs of unselected/future rounds do not determine a decision. Selected clients return observed costs, historical means update incrementally, and every queue updates by max(queue+spent_this_round-budget/rounds,0). The common availability, byte, FLOP and cardinality caps apply; only clients with estimated energy fitting the remaining budget remain eligible. Actual finite-horizon budget overshoots are explicitly reported, never clipped or asserted impossible.
 
-
-`--method eacs_fl --resource-trace path.npz` implements the EACS-FL resource protocol as the single-global-model special case of [Zhu et al., Computer Networks 2024](https://par.nsf.gov/servlets/purl/10535691), equations (3)-(10) and Algorithm 1. A required external trace supplies energy/delay arrays shaped [rounds+1,clients] and per-client budget[clients]. Row0 holds preflight observations already available before replay; budgets apply to the subsequent replay. In each round, the selection score is V*historical_mean_delay + energy_queue*historical_mean_energy - sqrt((K+1)*log(t)/pulls). Costs of unselected/future rounds do not determine a decision. Selected clients return observed costs, historical means update incrementally, and every queue updates by max(queue+spent_this_round-budget/rounds,0). The common availability, byte, FLOP and cardinality caps apply; only clients with estimated energy fitting the remaining budget remain eligible. Actual finite-horizon budget overshoots are explicitly reported, never clipped or asserted impossible. The source paper's multi-model assignment is unnecessary for this one-model building protocol.
-
-A selected client exceeding `--maximum-delay` is trained/accounted but excluded from server aggregation, exactly preserving the deadline failure condition. Both selected updates and sixteen-byte cost telemetry replies count toward upload, while model downloads and total optimizer steps remain in the common ledger. The resource report exports spent energy, budgets, virtual queues, budget violations and deadline failures; physical energy is not inferred from the FLOP proxy. `--resource-weight` specifies V. Functional fixtures provide synthetic costs only, and exercise historical-score/mean arithmetic plus an all-late round whose final checkpoint equals the initial global model despite charged local updates. `python verify.py` passes twelve neural/protocol methods. Su et al. LCCS (DOI10.1016/j.comnet.2024.110517) remains source-blocked: its publisher preview and author publication page lack the Section4 gradient-valuation/queue-threshold equations needed for a faithful implementation; no substitute is named LCCS.
+A selected client exceeding `--maximum-delay` is trained/accounted but excluded from server aggregation, exactly preserving the deadline failure condition. Both selected updates and sixteen-byte cost telemetry replies count toward upload, while model downloads and total optimizer steps remain in the common ledger. The resource report exports spent energy, budgets, virtual queues, budget violations and deadline failures; physical energy is not inferred from the FLOP proxy. `--resource-weight` specifies V.
